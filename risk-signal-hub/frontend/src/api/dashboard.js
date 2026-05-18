@@ -15,10 +15,15 @@ export const DASHBOARD_KEYS = {
 
 let _allPromise = null;
 
-async function _fetchWithRetry(maxAttempts = 4, delayMs = 8000) {
+// Retry up to 5 times with 15s gaps.
+// The backend starts a warmup thread on startup; by attempt 2-3 the cache
+// should be hot even if the first attempt was dropped by the proxy.
+async function _fetchWithRetry(maxAttempts = 5, delayMs = 15_000) {
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      return await get("/dashboard/all", 90_000);
+      // 55s timeout — just under Databricks Apps' ~60s proxy cutoff
+      // so our AbortError fires first, giving a cleaner retry than a 504
+      return await get("/dashboard/all", 55_000);
     } catch (e) {
       if (attempt === maxAttempts) throw e;
       await new Promise(r => setTimeout(r, delayMs));

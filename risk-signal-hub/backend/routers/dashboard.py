@@ -1,12 +1,18 @@
 import time
+import threading
 from fastapi import APIRouter
 from core.db import fetch, _conn
 from core.config import T
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
+# ── in-process cache ──────────────────────────────────────────────────────────
 _cache: dict = {}
 _CACHE_TTL = 300  # 5 minutes
+
+_warmup_lock  = threading.Lock()
+_warmup_event = threading.Event()   # set when warmup finishes (ok or error)
+_warmup_thread: threading.Thread | None = None
 
 
 def _cached_all():
@@ -20,109 +26,9 @@ def _store_all(data):
     _cache["all"] = {"data": data, "ts": time.time()}
 
 
-@router.get("/all")
-def all_dashboard():
-    cached = _cached_all()
-    if cached is not None:
-        return cached
-    queries = {
-        "kpis": f"""
-            SELECT
-                ROUND(SUM(fraud_count) * 100.0 / NULLIF(SUM(txn_count), 0), 2) AS fraud_rate_pct,
-                SUM(txn_count)                                                   AS total_txns,
-                SUM(fraud_count)                                                 AS total_fraud,
-                SUM(decline_count)                                               AS total_declines,
-                ROUND(SUM(total_amount) / 100000, 1)                             AS exposure_lakhs,
-                ROUND(SUM(decline_count) * 100.0 / NULLIF(SUM(txn_count), 0), 2) AS decline_rate_pct,
-                ROUND(AVG(avg_risk_score), 1)                                    AS avg_risk_score
-            FROM {T['agg']}
-            WHERE txn_date = (SELECT MAX(txn_date) FROM {T['agg']})
-        """,
-        "hourly": f"""
-            SELECT txn_hour, payment_method,
-                SUM(txn_count)   AS txn_count,
-                SUM(fraud_count) AS fraud_count,
-                ROUND(SUM(fraud_count) * 100.0 / NULLIF(SUM(txn_count), 0), 3) AS fraud_rate_pct
-            FROM {T['agg']}
-            WHERE txn_date = (SELECT MAX(txn_date) FROM {T['agg']})
-              AND txn_hour IS NOT NULL
-            GROUP BY txn_hour, payment_method
-            ORDER BY txn_hour, payment_method
-        """,
-        "decline": f"""
-            SELECT COALESCE(decline_reason, 'NO_DECLINE') AS decline_reason, COUNT(*) AS cnt
-            FROM {T['events']}
-            WHERE DATE(txn_timestamp) = (SELECT MAX(DATE(txn_timestamp)) FROM {T['events']})
-              AND decline_reason IS NOT NULL
-            GROUP BY decline_reason ORDER BY cnt DESC
-        """,
-        "riskDist": f"""
-            SELECT
-                CASE
-                    WHEN risk_score BETWEEN 0  AND 20  THEN '0-20'
-                    WHEN risk_score BETWEEN 21 AND 40  THEN '21-40'
-                    WHEN risk_score BETWEEN 41 AND 60  THEN '41-60'
-                    WHEN risk_score BETWEEN 61 AND 80  THEN '61-80'
-                    WHEN risk_score BETWEEN 81 AND 100 THEN '81-100'
-                END AS bucket,
-                COUNT(*) AS cnt
-            FROM {T['events']}
-            WHERE DATE(txn_timestamp) = (SELECT MAX(DATE(txn_timestamp)) FROM {T['events']})
-            GROUP BY 1 ORDER BY 1
-        """,
-        "trend": f"""
-            SELECT CAST(txn_date AS STRING) AS txn_date,
-                SUM(txn_count)   AS txn_count,
-                SUM(fraud_count) AS fraud_count,
-                ROUND(SUM(fraud_count) * 100.0 / NULLIF(SUM(txn_count), 0), 3) AS fraud_rate_pct
-            FROM {T['agg']}
-            WHERE txn_date >= (SELECT MAX(txn_date) FROM {T['agg']}) - INTERVAL 7 DAYS
-            GROUP BY txn_date ORDER BY txn_date
-        """,
-        "channels": f"""
-            SELECT payment_method,
-                SUM(txn_count)   AS txn_count,
-                SUM(fraud_count) AS fraud_count,
-                ROUND(SUM(fraud_count) * 100.0 / NULLIF(SUM(txn_count), 0), 2) AS fraud_rate_pct
-            FROM {T['agg']}
-            WHERE txn_date >= (SELECT MAX(txn_date) FROM {T['agg']}) - INTERVAL 7 DAYS
-            GROUP BY payment_method ORDER BY fraud_rate_pct DESC
-        """,
-        "alerts": f"""
-            SELECT case_id, title, severity, status, exposure_amt,
-                CAST(created_at AS STRING) AS created_at
-            FROM {T['cases']}
-            WHERE UPPER(status) != 'CLOSED'
-            ORDER BY CASE UPPER(severity) WHEN 'CRITICAL' THEN 1 WHEN 'WARNING' THEN 2 ELSE 3 END,
-                     created_at DESC
-            LIMIT 5
-        """,
-        "accounts": f"""
-            SELECT customer_id, ROUND(avg_risk_score, 0) AS risk_score,
-                total_txns, fraud_txns, account_age_days,
-                unique_devices, preferred_method, fraud_pattern
-            FROM {T['accounts']}
-            WHERE fraud_pattern != 'NORMAL'
-            ORDER BY avg_risk_score DESC LIMIT 50
-        """,
-    }
-
-    result = {}
-    with _conn() as conn:
-        with conn.cursor() as cur:
-            for key, sql in queries.items():
-                cur.execute(sql)
-                cols = [d[0] for d in cur.description]
-                rows = [dict(zip(cols, row)) for row in cur.fetchall()]
-                result[key] = rows[0] if key == "kpis" and rows else rows
-
-    _store_all(result)
-    return result
-
-
-@router.get("/kpis")
-def kpis():
-    rows = fetch(f"""
+# ── query runner ──────────────────────────────────────────────────────────────
+_QUERIES = {
+    "kpis": f"""
         SELECT
             ROUND(SUM(fraud_count) * 100.0 / NULLIF(SUM(txn_count), 0), 2) AS fraud_rate_pct,
             SUM(txn_count)                                                   AS total_txns,
@@ -133,44 +39,26 @@ def kpis():
             ROUND(AVG(avg_risk_score), 1)                                    AS avg_risk_score
         FROM {T['agg']}
         WHERE txn_date = (SELECT MAX(txn_date) FROM {T['agg']})
-    """)
-    return rows[0] if rows else {}
-
-
-@router.get("/hourly")
-def hourly():
-    return fetch(f"""
-        SELECT
-            txn_hour,
-            payment_method,
-            SUM(txn_count)                                                    AS txn_count,
-            SUM(fraud_count)                                                  AS fraud_count,
-            ROUND(SUM(fraud_count) * 100.0 / NULLIF(SUM(txn_count), 0), 3)   AS fraud_rate_pct
+    """,
+    "hourly": f"""
+        SELECT txn_hour, payment_method,
+            SUM(txn_count)   AS txn_count,
+            SUM(fraud_count) AS fraud_count,
+            ROUND(SUM(fraud_count) * 100.0 / NULLIF(SUM(txn_count), 0), 3) AS fraud_rate_pct
         FROM {T['agg']}
         WHERE txn_date = (SELECT MAX(txn_date) FROM {T['agg']})
           AND txn_hour IS NOT NULL
         GROUP BY txn_hour, payment_method
         ORDER BY txn_hour, payment_method
-    """)
-
-
-@router.get("/decline-breakdown")
-def decline_breakdown():
-    return fetch(f"""
-        SELECT
-            COALESCE(decline_reason, 'NO_DECLINE') AS decline_reason,
-            COUNT(*)                                AS cnt
+    """,
+    "decline": f"""
+        SELECT COALESCE(decline_reason, 'NO_DECLINE') AS decline_reason, COUNT(*) AS cnt
         FROM {T['events']}
         WHERE DATE(txn_timestamp) = (SELECT MAX(DATE(txn_timestamp)) FROM {T['events']})
           AND decline_reason IS NOT NULL
-        GROUP BY decline_reason
-        ORDER BY cnt DESC
-    """)
-
-
-@router.get("/risk-score-dist")
-def risk_score_dist():
-    return fetch(f"""
+        GROUP BY decline_reason ORDER BY cnt DESC
+    """,
+    "riskDist": f"""
         SELECT
             CASE
                 WHEN risk_score BETWEEN 0  AND 20  THEN '0-20'
@@ -182,75 +70,248 @@ def risk_score_dist():
             COUNT(*) AS cnt
         FROM {T['events']}
         WHERE DATE(txn_timestamp) = (SELECT MAX(DATE(txn_timestamp)) FROM {T['events']})
-        GROUP BY 1
-        ORDER BY 1
+        GROUP BY 1 ORDER BY 1
+    """,
+    "trend": f"""
+        SELECT CAST(txn_date AS STRING) AS txn_date,
+            SUM(txn_count)   AS txn_count,
+            SUM(fraud_count) AS fraud_count,
+            ROUND(SUM(fraud_count) * 100.0 / NULLIF(SUM(txn_count), 0), 3) AS fraud_rate_pct
+        FROM {T['agg']}
+        WHERE txn_date >= (SELECT MAX(txn_date) FROM {T['agg']}) - INTERVAL 7 DAYS
+        GROUP BY txn_date ORDER BY txn_date
+    """,
+    "channels": f"""
+        SELECT payment_method,
+            SUM(txn_count)   AS txn_count,
+            SUM(fraud_count) AS fraud_count,
+            ROUND(SUM(fraud_count) * 100.0 / NULLIF(SUM(txn_count), 0), 2) AS fraud_rate_pct
+        FROM {T['agg']}
+        WHERE txn_date >= (SELECT MAX(txn_date) FROM {T['agg']}) - INTERVAL 7 DAYS
+        GROUP BY payment_method ORDER BY fraud_rate_pct DESC
+    """,
+    "alerts": f"""
+        SELECT case_id, title, severity, status, exposure_amt,
+            CAST(created_at AS STRING) AS created_at
+        FROM {T['cases']}
+        WHERE UPPER(status) != 'CLOSED'
+        ORDER BY CASE UPPER(severity) WHEN 'CRITICAL' THEN 1 WHEN 'WARNING' THEN 2 ELSE 3 END,
+                 created_at DESC
+        LIMIT 5
+    """,
+    "accounts": f"""
+        SELECT customer_id, ROUND(avg_risk_score, 0) AS risk_score,
+            total_txns, fraud_txns, account_age_days,
+            unique_devices, preferred_method, fraud_pattern
+        FROM {T['accounts']}
+        WHERE fraud_pattern != 'NORMAL'
+        ORDER BY avg_risk_score DESC LIMIT 50
+    """,
+}
+
+
+def _run_queries() -> dict:
+    result = {}
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            for key, sql in _QUERIES.items():
+                try:
+                    cur.execute(sql)
+                    cols = [d[0] for d in cur.description]
+                    rows = [dict(zip(cols, row)) for row in cur.fetchall()]
+                    result[key] = rows[0] if key == "kpis" and rows else rows
+                except Exception as e:
+                    print(f"[WARN] dashboard query '{key}' failed: {e}", flush=True)
+                    result[key] = {} if key == "kpis" else []
+    return result
+
+
+# ── background warmup ─────────────────────────────────────────────────────────
+
+def _warmup_worker():
+    global _warmup_thread
+    try:
+        data = _run_queries()
+        _store_all(data)
+        print("[INFO] dashboard cache ready", flush=True)
+    except Exception as e:
+        print(f"[ERROR] dashboard warmup: {e}", flush=True)
+    finally:
+        _warmup_event.set()
+        with _warmup_lock:
+            _warmup_thread = None
+
+
+def _ensure_warmup():
+    """Start background warmup if not already running."""
+    global _warmup_thread
+    with _warmup_lock:
+        if _warmup_thread is None or not _warmup_thread.is_alive():
+            _warmup_event.clear()
+            _warmup_thread = threading.Thread(target=_warmup_worker, daemon=True, name="db-warmup")
+            _warmup_thread.start()
+
+
+# Kick off on import (app startup) — runs in background, not subject to proxy timeout
+_ensure_warmup()
+
+
+# ── endpoint ──────────────────────────────────────────────────────────────────
+
+@router.get("/all")
+def all_dashboard():
+    # Fast path: cache hit
+    cached = _cached_all()
+    if cached is not None:
+        return cached
+
+    # Warmup in progress: wait for it (up to 150s).
+    # If the proxy drops THIS connection at 60s, the warmup thread keeps running.
+    # The next retry request will hit the cache immediately.
+    _ensure_warmup()
+    _warmup_event.wait(timeout=150)
+
+    cached = _cached_all()
+    if cached is not None:
+        return cached
+
+    # Warmup failed — run inline as last resort so the caller gets something
+    data = _run_queries()
+    _store_all(data)
+    return data
+
+
+@router.get("/cache-status")
+def cache_status():
+    entry = _cache.get("all")
+    warmup_running = _warmup_thread is not None and _warmup_thread.is_alive()
+    return {
+        "cached": entry is not None,
+        "age_s": round(time.time() - entry["ts"]) if entry else None,
+        "warmup_running": warmup_running,
+    }
+
+
+# ── legacy individual endpoints (kept for compatibility) ──────────────────────
+
+@router.get("/kpis")
+def kpis():
+    cached = _cached_all()
+    if cached:
+        return cached.get("kpis", {})
+    rows = fetch(f"""
+        SELECT
+            ROUND(SUM(fraud_count) * 100.0 / NULLIF(SUM(txn_count), 0), 2) AS fraud_rate_pct,
+            SUM(txn_count)   AS total_txns, SUM(fraud_count)   AS total_fraud,
+            SUM(decline_count) AS total_declines,
+            ROUND(SUM(total_amount) / 100000, 1) AS exposure_lakhs,
+            ROUND(SUM(decline_count) * 100.0 / NULLIF(SUM(txn_count), 0), 2) AS decline_rate_pct,
+            ROUND(AVG(avg_risk_score), 1) AS avg_risk_score
+        FROM {T['agg']} WHERE txn_date = (SELECT MAX(txn_date) FROM {T['agg']})
+    """)
+    return rows[0] if rows else {}
+
+
+@router.get("/hourly")
+def hourly():
+    cached = _cached_all()
+    if cached:
+        return cached.get("hourly", [])
+    return fetch(f"""
+        SELECT txn_hour, payment_method,
+            SUM(txn_count) AS txn_count, SUM(fraud_count) AS fraud_count,
+            ROUND(SUM(fraud_count)*100.0/NULLIF(SUM(txn_count),0),3) AS fraud_rate_pct
+        FROM {T['agg']}
+        WHERE txn_date=(SELECT MAX(txn_date) FROM {T['agg']}) AND txn_hour IS NOT NULL
+        GROUP BY txn_hour, payment_method ORDER BY txn_hour, payment_method
+    """)
+
+
+@router.get("/decline-breakdown")
+def decline_breakdown():
+    cached = _cached_all()
+    if cached:
+        return cached.get("decline", [])
+    return fetch(f"""
+        SELECT COALESCE(decline_reason,'NO_DECLINE') AS decline_reason, COUNT(*) AS cnt
+        FROM {T['events']}
+        WHERE DATE(txn_timestamp)=(SELECT MAX(DATE(txn_timestamp)) FROM {T['events']})
+          AND decline_reason IS NOT NULL
+        GROUP BY decline_reason ORDER BY cnt DESC
+    """)
+
+
+@router.get("/risk-score-dist")
+def risk_score_dist():
+    cached = _cached_all()
+    if cached:
+        return cached.get("riskDist", [])
+    return fetch(f"""
+        SELECT CASE WHEN risk_score BETWEEN 0 AND 20 THEN '0-20'
+                    WHEN risk_score BETWEEN 21 AND 40 THEN '21-40'
+                    WHEN risk_score BETWEEN 41 AND 60 THEN '41-60'
+                    WHEN risk_score BETWEEN 61 AND 80 THEN '61-80'
+                    WHEN risk_score BETWEEN 81 AND 100 THEN '81-100' END AS bucket,
+               COUNT(*) AS cnt
+        FROM {T['events']}
+        WHERE DATE(txn_timestamp)=(SELECT MAX(DATE(txn_timestamp)) FROM {T['events']})
+        GROUP BY 1 ORDER BY 1
     """)
 
 
 @router.get("/seven-day-trend")
 def seven_day_trend():
+    cached = _cached_all()
+    if cached:
+        return cached.get("trend", [])
     return fetch(f"""
-        SELECT
-            CAST(txn_date AS STRING)                                          AS txn_date,
-            SUM(txn_count)                                                    AS txn_count,
-            SUM(fraud_count)                                                  AS fraud_count,
-            ROUND(SUM(fraud_count) * 100.0 / NULLIF(SUM(txn_count), 0), 3)   AS fraud_rate_pct
+        SELECT CAST(txn_date AS STRING) AS txn_date,
+            SUM(txn_count) AS txn_count, SUM(fraud_count) AS fraud_count,
+            ROUND(SUM(fraud_count)*100.0/NULLIF(SUM(txn_count),0),3) AS fraud_rate_pct
         FROM {T['agg']}
-        WHERE txn_date >= (SELECT MAX(txn_date) FROM {T['agg']}) - INTERVAL 7 DAYS
-        GROUP BY txn_date
-        ORDER BY txn_date
+        WHERE txn_date>=(SELECT MAX(txn_date) FROM {T['agg']})-INTERVAL 7 DAYS
+        GROUP BY txn_date ORDER BY txn_date
     """)
 
 
 @router.get("/channel-split")
 def channel_split():
+    cached = _cached_all()
+    if cached:
+        return cached.get("channels", [])
     return fetch(f"""
-        SELECT
-            payment_method,
-            SUM(txn_count)                                                    AS txn_count,
-            SUM(fraud_count)                                                  AS fraud_count,
-            ROUND(SUM(fraud_count) * 100.0 / NULLIF(SUM(txn_count), 0), 2)   AS fraud_rate_pct
+        SELECT payment_method, SUM(txn_count) AS txn_count, SUM(fraud_count) AS fraud_count,
+            ROUND(SUM(fraud_count)*100.0/NULLIF(SUM(txn_count),0),2) AS fraud_rate_pct
         FROM {T['agg']}
-        WHERE txn_date >= (SELECT MAX(txn_date) FROM {T['agg']}) - INTERVAL 7 DAYS
-        GROUP BY payment_method
-        ORDER BY fraud_rate_pct DESC
+        WHERE txn_date>=(SELECT MAX(txn_date) FROM {T['agg']})-INTERVAL 7 DAYS
+        GROUP BY payment_method ORDER BY fraud_rate_pct DESC
     """)
 
 
 @router.get("/alerts")
 def alerts():
+    cached = _cached_all()
+    if cached:
+        return cached.get("alerts", [])
     return fetch(f"""
-        SELECT
-            case_id, title, severity, status,
-            exposure_amt,
+        SELECT case_id, title, severity, status, exposure_amt,
             CAST(created_at AS STRING) AS created_at
         FROM {T['cases']}
-        WHERE UPPER(status) != 'CLOSED'
-        ORDER BY
-            CASE UPPER(severity)
-                WHEN 'CRITICAL' THEN 1
-                WHEN 'WARNING'  THEN 2
-                ELSE 3
-            END,
-            created_at DESC
-        LIMIT 5
+        WHERE UPPER(status)!='CLOSED'
+        ORDER BY CASE UPPER(severity) WHEN 'CRITICAL' THEN 1 WHEN 'WARNING' THEN 2 ELSE 3 END,
+                 created_at DESC LIMIT 5
     """)
 
 
 @router.get("/flagged-accounts")
 def flagged_accounts():
+    cached = _cached_all()
+    if cached:
+        return cached.get("accounts", [])
     return fetch(f"""
-        SELECT
-            customer_id,
-            ROUND(avg_risk_score, 0)  AS risk_score,
-            total_txns,
-            fraud_txns,
-            account_age_days,
-            unique_devices,
-            preferred_method,
-            fraud_pattern
-        FROM {T['accounts']}
-        WHERE fraud_pattern != 'NORMAL'
-        ORDER BY avg_risk_score DESC
-        LIMIT 50
+        SELECT customer_id, ROUND(avg_risk_score,0) AS risk_score,
+            total_txns, fraud_txns, account_age_days,
+            unique_devices, preferred_method, fraud_pattern
+        FROM {T['accounts']} WHERE fraud_pattern!='NORMAL'
+        ORDER BY avg_risk_score DESC LIMIT 50
     """)
