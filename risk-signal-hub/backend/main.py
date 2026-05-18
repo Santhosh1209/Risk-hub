@@ -1,8 +1,9 @@
 import os
+import traceback
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from routers import dashboard, forecast
@@ -25,6 +26,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(Exception)
+async def _global_error(request: Request, exc: Exception):
+    tb = traceback.format_exc()
+    print(f"[ERROR] {request.url}\n{tb}", flush=True)
+    return JSONResponse(status_code=500, content={"error": str(exc), "trace": tb[-800:]})
 
 app.include_router(network_router,   prefix="/api")
 app.include_router(cases_router,     prefix="/api")

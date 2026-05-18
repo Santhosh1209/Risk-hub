@@ -1,29 +1,42 @@
-from databricks import sql
-from core.config import (
-    DATABRICKS_HOST,
-    SQL_WAREHOUSE_ID,
-    _auth_token,
-)
+from databricks.sdk import WorkspaceClient
+from databricks.sdk.service.sql import StatementState, Disposition
+from core.config import SQL_WAREHOUSE_ID
 
 
-def _conn():
-    return sql.connect(
-        server_hostname=DATABRICKS_HOST.replace("https://", ""),
-        http_path=f"/sql/1.0/warehouses/{SQL_WAREHOUSE_ID}",
-        access_token=_auth_token(),
-    )
+def _wc() -> WorkspaceClient:
+    return WorkspaceClient()
 
 
 def fetch(query: str) -> list[dict]:
-    with _conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(query)
-            cols = [d[0] for d in cur.description]
-            return [dict(zip(cols, row)) for row in cur.fetchall()]
+    w = _wc()
+    resp = w.statement_execution.execute_statement(
+        statement=query,
+        warehouse_id=SQL_WAREHOUSE_ID,
+        wait_timeout="50s",
+        disposition=Disposition.INLINE,
+    )
+    if resp.status.state != StatementState.SUCCEEDED:
+        err = resp.status.error
+        raise RuntimeError(
+            f"Query failed [{resp.status.state}]: "
+            f"{err.message if err else 'unknown error'}"
+        )
+    if not resp.result or not resp.result.data_array:
+        return []
+    cols = [c.name for c in resp.manifest.schema.columns]
+    return [dict(zip(cols, row)) for row in resp.result.data_array]
 
 
 def execute(query: str) -> None:
-    with _conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(query)
-            conn.commit()
+    w = _wc()
+    resp = w.statement_execution.execute_statement(
+        statement=query,
+        warehouse_id=SQL_WAREHOUSE_ID,
+        wait_timeout="50s",
+    )
+    if resp.status.state not in (StatementState.SUCCEEDED,):
+        err = resp.status.error
+        raise RuntimeError(
+            f"Query failed [{resp.status.state}]: "
+            f"{err.message if err else 'unknown error'}"
+        )
