@@ -1,0 +1,28 @@
+# Python
+venv/
+.venv/
+**/venv/
+**/.venv/
+__pycache__/
+*.pyc
+
+# Environment files
+.env
+
+# Node
+node_modules/
+
+# React build
+dist/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Vite
+.vite/
+
+# Logs
+*.log
+
+ .claude/

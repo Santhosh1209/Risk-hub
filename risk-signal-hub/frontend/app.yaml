@@ -1,0 +1,11 @@
+build:
+  commands:
+    - npm ci
+    - npm run build
+command:
+  - python
+  - -m
+  - http.server
+  - "3000"
+  - --directory
+  - dist
