@@ -46,7 +46,7 @@ def health():
 
 
 # ── serve React build (production / Databricks Apps) ──────────────────────
-DIST = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
+DIST = os.path.join(os.path.dirname(__file__), "dist")
 
 if os.path.isdir(DIST):
     @app.get("/")
