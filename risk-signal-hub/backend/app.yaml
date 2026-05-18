@@ -12,6 +12,10 @@ command:
 
 env:
   - name: GMAIL_SENDER
-    valueFrom: GMAIL_SENDER
+    valueFrom: gmail:GMAIL_SENDER
   - name: GMAIL_APP_PASS
-    valueFrom: GMAIL_APP_PASS
+    valueFrom: gmail:GMAIL_APP_PASS
+  - name: SQL_WAREHOUSE_ID
+    valueFrom: riskhub:SQL_WAREHOUSE_ID
+  - name: GENIE_SPACE_ID
+    valueFrom: riskhub:GENIE_SPACE_ID
