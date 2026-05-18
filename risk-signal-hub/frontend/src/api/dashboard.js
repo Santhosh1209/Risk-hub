@@ -1,7 +1,8 @@
 import { get } from "./client.js";
-import { getCached, setCached } from "./cache.js";
+import { getCached, setCached, invalidate } from "./cache.js";
 
 export const DASHBOARD_KEYS = {
+  all:     "dashboard/all",
   kpis:    "dashboard/kpis",
   hourly:  "dashboard/hourly",
   decline: "dashboard/decline",
@@ -12,19 +13,23 @@ export const DASHBOARD_KEYS = {
   flagged: "dashboard/flagged",
 };
 
-function cached(key, fetcher) {
-  const hit = getCached(key);
+let _allPromise = null;
+
+function fetchAll() {
+  const hit = getCached(DASHBOARD_KEYS.all);
   if (hit !== null) return Promise.resolve(hit);
-  return fetcher().then(v => setCached(key, v));
+  if (_allPromise) return _allPromise;
+  _allPromise = get("/dashboard/all", 180_000)
+    .then(v => { setCached(DASHBOARD_KEYS.all, v); _allPromise = null; return v; })
+    .catch(e => { _allPromise = null; throw e; });
+  return _allPromise;
 }
 
-const T = 120_000; // 2 min — allow for cold warehouse start
-
-export const fetchKPIs            = () => cached(DASHBOARD_KEYS.kpis,     () => get("/dashboard/kpis", T));
-export const fetchHourly          = () => cached(DASHBOARD_KEYS.hourly,   () => get("/dashboard/hourly", T));
-export const fetchDecline         = () => cached(DASHBOARD_KEYS.decline,  () => get("/dashboard/decline-breakdown", T));
-export const fetchRiskDist        = () => cached(DASHBOARD_KEYS.riskDist, () => get("/dashboard/risk-score-dist", T));
-export const fetchSevenDayTrend   = () => cached(DASHBOARD_KEYS.trend,    () => get("/dashboard/seven-day-trend", T));
-export const fetchChannelSplit    = () => cached(DASHBOARD_KEYS.channels,  () => get("/dashboard/channel-split", T));
-export const fetchAlerts          = () => cached(DASHBOARD_KEYS.alerts,   () => get("/dashboard/alerts", T));
-export const fetchFlaggedAccounts = () => cached(DASHBOARD_KEYS.flagged,  () => get("/dashboard/flagged-accounts", T));
+export const fetchKPIs            = () => fetchAll().then(d => d.kpis);
+export const fetchHourly          = () => fetchAll().then(d => d.hourly);
+export const fetchDecline         = () => fetchAll().then(d => d.decline);
+export const fetchRiskDist        = () => fetchAll().then(d => d.riskDist);
+export const fetchSevenDayTrend   = () => fetchAll().then(d => d.trend);
+export const fetchChannelSplit    = () => fetchAll().then(d => d.channels);
+export const fetchAlerts          = () => fetchAll().then(d => d.alerts);
+export const fetchFlaggedAccounts = () => fetchAll().then(d => d.accounts);
