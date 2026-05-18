@@ -1,4 +1,7 @@
-dockerfile: Dockerfile
+build:
+  commands:
+    - cd ../frontend && npm ci && npm run build
+
 command:
   - uvicorn
   - main:app
