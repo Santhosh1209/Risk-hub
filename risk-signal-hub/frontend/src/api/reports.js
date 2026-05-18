@@ -7,7 +7,7 @@ const CTX_KEY = "reports/context";
 export async function fetchReportContext() {
   const cached = getCached(CTX_KEY);
   if (cached !== null) return cached;
-  const data = await get("/reports/context", 30_000);
+  const data = await get("/reports/context", 120_000);
   setCached(CTX_KEY, data);
   return data;
 }

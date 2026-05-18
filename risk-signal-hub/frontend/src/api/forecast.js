@@ -15,8 +15,10 @@ function cached(key, fetcher) {
   return fetcher().then(v => setCached(key, v));
 }
 
-export const fetchHistory          = () => cached(FORECAST_KEYS.history,         () => get("/forecast/history"));
-export const fetchPredictions      = (horizon = 7) => cached(FORECAST_KEYS.predict(horizon), () => get(`/forecast/predict?horizon=${horizon}`));
-export const fetchMerchants        = () => cached(FORECAST_KEYS.merchants,       () => get("/forecast/merchants"));
-export const fetchCityRisk         = () => cached(FORECAST_KEYS.cityRisk,        () => get("/forecast/city-risk"));
-export const fetchSuspectCustomers = () => cached(FORECAST_KEYS.suspects,        () => get("/forecast/suspect-customers"));
+const T = 120_000;
+
+export const fetchHistory          = () => cached(FORECAST_KEYS.history,         () => get("/forecast/history", T));
+export const fetchPredictions      = (horizon = 7) => cached(FORECAST_KEYS.predict(horizon), () => get(`/forecast/predict?horizon=${horizon}`, T));
+export const fetchMerchants        = () => cached(FORECAST_KEYS.merchants,       () => get("/forecast/merchants", T));
+export const fetchCityRisk         = () => cached(FORECAST_KEYS.cityRisk,        () => get("/forecast/city-risk", T));
+export const fetchSuspectCustomers = () => cached(FORECAST_KEYS.suspects,        () => get("/forecast/suspect-customers", T));

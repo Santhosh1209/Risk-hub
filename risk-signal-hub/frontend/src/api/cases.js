@@ -12,8 +12,10 @@ function cached(key, fetcher) {
   return fetcher().then(v => setCached(key, v));
 }
 
-export const fetchCases      = (status) => cached(CASES_KEYS.list(status), () => get(`/cases${status && status !== "all" ? `?status=${encodeURIComponent(status)}` : ""}`));
-export const fetchCaseCounts = ()       => cached(CASES_KEYS.counts, () => get("/cases/counts"));
+const T = 120_000;
+
+export const fetchCases      = (status) => cached(CASES_KEYS.list(status), () => get(`/cases${status && status !== "all" ? `?status=${encodeURIComponent(status)}` : ""}`, T));
+export const fetchCaseCounts = ()       => cached(CASES_KEYS.counts, () => get("/cases/counts", T));
 export const updateStatus    = (id, status) => post(`/cases/${encodeURIComponent(id)}/status`, { status });
 export const updateNotes     = (id, notes)  => post(`/cases/${encodeURIComponent(id)}/notes`,  { notes });
 export const sendEmail       = (to, subject, body) => post("/cases/send-email", { to, subject, body });
