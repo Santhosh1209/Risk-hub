@@ -25,23 +25,12 @@ AI_ENDPOINT = f"https://{DATABRICKS_HOST}/serving-endpoints/databricks-meta-llam
 def _auth_token() -> str:
     if DATABRICKS_TOKEN:
         return DATABRICKS_TOKEN
-    # Databricks Apps: exchange client credentials for a token
-    client_id     = os.environ.get("DATABRICKS_CLIENT_ID", "")
-    client_secret = os.environ.get("DATABRICKS_CLIENT_SECRET", "")
-    if client_id and client_secret:
-        import urllib.request, urllib.parse, json as _json, base64
-        creds   = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
-        payload = urllib.parse.urlencode({"grant_type": "client_credentials",
-                                          "scope": "all-apis"}).encode()
-        req     = urllib.request.Request(
-            f"https://{DATABRICKS_HOST}/oidc/v1/token",
-            data=payload,
-            headers={"Authorization": f"Basic {creds}",
-                     "Content-Type": "application/x-www-form-urlencoded"},
-        )
-        with urllib.request.urlopen(req) as r:
-            return _json.loads(r.read())["access_token"]
-    return ""
+    try:
+        from databricks.sdk import WorkspaceClient
+        headers = WorkspaceClient().config.authenticate()
+        return headers.get("Authorization", "Bearer ").removeprefix("Bearer ")
+    except Exception:
+        return ""
 
 AI_HEADERS = {
     "Authorization": f"Bearer {_auth_token()}",
