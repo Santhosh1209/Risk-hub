@@ -26,9 +26,11 @@ export default function Sidebar({ onAction, onAlertCount }) {
   const [trend,    setTrend]    = useState([]);
   const [channels, setChannels] = useState([]);
   const [alerts,   setAlerts]   = useState([]);
+  const [loadErr,  setLoadErr]  = useState(null);
 
   useEffect(() => {
-    fetchKPIs().then(setKpis).catch(() => {});
+    setLoadErr(null);
+    fetchKPIs().then(setKpis).catch(e => setLoadErr(e.message || "Failed"));
     fetchSevenDayTrend().then(v => setTrend(v || [])).catch(() => {});
     fetchChannelSplit().then(v => setChannels(v || [])).catch(() => {});
     fetchAlerts().then(v => {
@@ -42,6 +44,13 @@ export default function Sidebar({ onAction, onAlertCount }) {
   return (
     <div style={{ width:280, flexShrink:0, borderRight:"1px solid rgba(255,255,255,.055)",
                   background:"#0c0f16", overflowY:"auto", padding:12 }}>
+      {loadErr && (
+        <div style={{ fontSize:11, color:"#f43f5e", background:"rgba(244,63,94,.08)",
+                      border:"1px solid rgba(244,63,94,.25)", borderRadius:6,
+                      padding:"6px 9px", marginBottom:10, fontFamily:"monospace" }}>
+          ⚠ {loadErr}
+        </div>
+      )}
       <Lbl>Live KPIs</Lbl>
       <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:5, marginBottom:18 }}>
         <KPICard label="Fraud rate"   value={kpis ? `${kpis.fraud_rate_pct}%` : "—"} delta="+0.61%" up />
@@ -70,7 +79,9 @@ export default function Sidebar({ onAction, onAlertCount }) {
           </ResponsiveContainer>
         ) : (
           <div style={{ height:105, display:"flex", alignItems:"center",
-                        justifyContent:"center", color:"#384d63", fontSize:12 }}>Loading…</div>
+                        justifyContent:"center", color:"#384d63", fontSize:12 }}>
+            {loadErr ? "—" : "Connecting…"}
+          </div>
         )}
       </div>
 
@@ -90,7 +101,9 @@ export default function Sidebar({ onAction, onAlertCount }) {
           </ResponsiveContainer>
         ) : (
           <div style={{ height:105, display:"flex", alignItems:"center",
-                        justifyContent:"center", color:"#384d63", fontSize:12 }}>Loading…</div>
+                        justifyContent:"center", color:"#384d63", fontSize:12 }}>
+            {loadErr ? "—" : "Connecting…"}
+          </div>
         )}
       </div>
 

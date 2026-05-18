@@ -1,13 +1,30 @@
+import time
 from fastapi import APIRouter
 from core.db import fetch, _conn
 from core.config import T
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
+_cache: dict = {}
+_CACHE_TTL = 300  # 5 minutes
+
+
+def _cached_all():
+    entry = _cache.get("all")
+    if entry and time.time() - entry["ts"] < _CACHE_TTL:
+        return entry["data"]
+    return None
+
+
+def _store_all(data):
+    _cache["all"] = {"data": data, "ts": time.time()}
+
 
 @router.get("/all")
 def all_dashboard():
-    """Single endpoint that runs all dashboard queries over one connection."""
+    cached = _cached_all()
+    if cached is not None:
+        return cached
     queries = {
         "kpis": f"""
             SELECT
@@ -99,6 +116,7 @@ def all_dashboard():
                 rows = [dict(zip(cols, row)) for row in cur.fetchall()]
                 result[key] = rows[0] if key == "kpis" and rows else rows
 
+    _store_all(result)
     return result
 
 
