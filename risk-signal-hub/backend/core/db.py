@@ -1,8 +1,8 @@
 from databricks import sql
 from core.config import (
     DATABRICKS_HOST,
-    DATABRICKS_TOKEN,
-    SQL_WAREHOUSE_ID
+    SQL_WAREHOUSE_ID,
+    _auth_token,
 )
 
 
@@ -10,7 +10,7 @@ def _conn():
     return sql.connect(
         server_hostname=DATABRICKS_HOST.replace("https://", ""),
         http_path=f"/sql/1.0/warehouses/{SQL_WAREHOUSE_ID}",
-        access_token=DATABRICKS_TOKEN,
+        access_token=_auth_token(),
     )
 
 
