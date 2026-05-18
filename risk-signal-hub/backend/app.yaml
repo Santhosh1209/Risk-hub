@@ -15,3 +15,5 @@ env:
     valueFrom: sql-wh-id
   - name: GENIE_SPACE_ID
     valueFrom: genie-id
+  - name: DATABRICKS_TOKEN
+    valueFrom: db-token
