@@ -49,6 +49,10 @@ def health():
 DIST = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
 
 if os.path.isdir(DIST):
+    @app.get("/")
+    async def serve_root():
+        return FileResponse(os.path.join(DIST, "index.html"))
+
     @app.get("/{full_path:path}")
     async def serve_spa(full_path: str):
         file = os.path.join(DIST, full_path)
